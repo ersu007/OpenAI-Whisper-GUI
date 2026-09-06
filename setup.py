@@ -6,74 +6,49 @@ import time
 
 def make_setup():
     if not sys.platform.startswith("win"):
-        print("This app only support Windows system!")
+        print("This app only supports Windows systems!")
         sys.exit()
 
     else:
-        try:
-            import pkg_resources
-        except ImportError:
-            subprocess.call('python -m pip install setuptools', shell=True)
-            import pkg_resources
-
-        # Checking the required folders
+        # Checking required folders
         folders = ["src"]
-        missing_folder = []
-        for i in folders:
-            if not os.path.exists(i):
-                missing_folder.append(i)
+        missing_folder = [folder for folder in folders if not os.path.exists(folder)]
         if missing_folder:
-            print("These folder(s) not available: " + str(missing_folder))
-            print("Download them from the repository properly")
+            print(f"These folder(s) are missing: {missing_folder}")
+            print("Please ensure your project structure includes all required directories.")
             sys.exit()
         else:
-            print("All folders available!")
+            print("All required folders detected!")
 
-        # Checking required modules
-        required = {"Pillow==10.1.0", "customtkinter==5.2.1", "packaging==23.2", "openai-whisper==20231117",
-                    "pynvml==11.5.0", "pydub==0.25.1"}
-        installed = {pkg.key for pkg in pkg_resources.working_set}
-        missing = required - installed
-        missing_set = [*missing, ]
-        pytorch_win = "torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118"
-        pytorch_linux = "torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118"
-        pytorch_mac = "torch torchvision torchaudio"
+        # Upgraded to fetch the latest whisper package alongside modern dependencies
+        required_modules = [
+            "Pillow>=10.0.0",
+            "customtkinter>=5.2.0",
+            "packaging>=23.0",
+            "openai-whisper",  # Pulls the latest release automatically
+            "pynvml",
+            "pydub"
+        ]
 
-        # Download the modules if not installed
-        if missing:
+        # Target PyTorch with CUDA 12.1 for current GPU drivers
+        pytorch_win = "torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121"
+
+        print("Installing/updating core dependencies to latest versions...")
+        for module in required_modules:
             try:
-                print("Installing modules...")
-                for x in range(len(missing_set)):
-                    y = missing_set[x]
-                    subprocess.call('python -m pip install ' + y, shell=True)
+                subprocess.call(f'"{sys.executable}" -m pip install -U {module}', shell=True)
             except Exception as e:
-                print(f"Error: {e}")
-                print("Unable to download! \nThis are the required ones: " + str(
-                    required) + "\nUse 'pip install module_name' to download the modules one by one.")
-                time.sleep(3)
-                sys.exit()
+                print(f"Error installing {module}: {e}")
 
-            try:
-                print("Installing Pytorch...")
-                if sys.platform.startswith("win"):
-                    subprocess.call('python -m pip install ' + pytorch_win, shell=True)
-                elif sys.platform.startswith("linux"):
-                    subprocess.call('python3 -m pip install ' + pytorch_linux, shell=True)
-                elif sys.platform.startswith("darwin"):
-                    subprocess.call('python3 -m pip install ' + pytorch_mac, shell=True)
-            except Exception as e:
-                print(f"Error: {e}")
-                print("Unable to download! \nThis are the required ones: " + str(
-                    required) + "\nUse 'pip/pip3 install module_name' to download the modules one by one.")
-                sys.exit()
+        print("Ensuring PyTorch with CUDA 12.1 is installed...")
+        try:
+            subprocess.call(f'"{sys.executable}" -m pip install {pytorch_win}', shell=True)
+        except Exception as e:
+            print(f"Error installing PyTorch: {e}")
+            print("Please manually run: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121")
 
-        else:
-            print("All required modules installed!")
-
-        # Everything done!
-        print("Setup Complete!")
-        time.sleep(5)
-        sys.exit()
+        print("\nSetup Complete!")
+        time.sleep(3)
 
 
 if __name__ == "__main__":

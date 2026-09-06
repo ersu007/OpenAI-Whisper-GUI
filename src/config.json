@@ -1,0 +1,19 @@
+{
+    "download_path": "F:/WhisperAI/OpenAI-Whisper-GUI",
+    "models": [
+        "medium",
+        "medium.en",
+        "small",
+        "small.en",
+        "tiny",
+        "base",
+        "tiny.en",
+        "base.en"
+    ],
+    "cuda": true,
+    "theme": "dark",
+    "model": "medium",
+    "language": "English",
+    "task": "Translate",
+    "device": "GPU"
+}

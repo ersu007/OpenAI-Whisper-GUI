@@ -1,5 +1,21 @@
 import os
 import sys
+import site
+import queue
+import threading
+from src.pipeline import run_gpu_pipeline
+
+# Register NVIDIA CUDA & cuDNN DLL directories for Windows CTranslate2 support
+try:
+    for sp in site.getsitepackages():
+        cudnn_path = os.path.join(sp, "nvidia", "cudnn", "bin")
+        cublas_path = os.path.join(sp, "nvidia", "cublas", "bin")
+        if os.path.exists(cudnn_path):
+            os.add_dll_directory(cudnn_path)
+        if os.path.exists(cublas_path):
+            os.add_dll_directory(cublas_path)
+except Exception as e:
+    print(f"Warning loading CUDA DLLs: {e}", flush=True)
 
 import customtkinter as ctk
 from customtkinter import filedialog as fd
@@ -15,6 +31,7 @@ CONFIG_FILE = f"{CURRENT_PATH}\\src\\config.json"
 class WhisperGui(ctk.CTk):
     def __init__(self):
         super().__init__()
+        self.gui_queue = queue.Queue()  # Thread-safe queue for live output
         self._on_startup()
         self._init_window()
         self._init_widgets()
@@ -23,7 +40,66 @@ class WhisperGui(ctk.CTk):
         self.file_path = None
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        
+    def start_transcription_process(self):
+        options = {
+            "audio": self.file_path,
+            "model": self.model_option.get(),
+            "device": "cuda",
+            "compute_type": "float16",
+            "language": self.lang_option.get(),
+            "secondary_language": self.sec_lang_option.get(),
+            "enable_retry": self.retry_switch.get() == 1,
+            "target_score": -1.0,
+            "task": "transcribe"
+        }
 
+    # Launch background thread using our new pipeline file
+        threading.Thread(
+            target=run_gpu_pipeline, 
+            args=(options, self.gui_queue), 
+            daemon=True
+        ).start()
+
+    # Start queue poller for UI updates
+        self.after(100, self.process_gui_queue)
+
+    def _async_transcribe_worker(self, options):
+        """Worker thread executing the transcription task."""
+        try:
+            from src.functions import transcriber_task
+            res = transcriber_task(options=options, gui_queue=self.gui_queue)
+            self.result = res
+        except Exception as e:
+            self.gui_queue.put(("text", f"\n❌ Error during processing: {e}\n"))
+        finally:
+            self.gui_queue.put(("done", None))
+
+    def process_gui_queue(self):
+        """Pulls text and progress updates from the background thread into the UI."""
+        try:
+            while True:
+                msg_type, data = self.gui_queue.get_nowait()
+                if msg_type == "text":
+                    if hasattr(self, "textbox"):
+                        self.textbox.insert(ctk.END, data)
+                        self.textbox.see(ctk.END)  # Auto-scroll to latest line
+                elif msg_type == "progress":
+                    pct, status_str = data
+                    if hasattr(self, "progress_bar"):
+                        self.progress_bar.set(pct / 100.0)
+                    if hasattr(self, "status_label"):
+                        self.status_label.configure(text=status_str)
+                elif msg_type == "done":
+                    if hasattr(self, "start_button"):
+                        self.start_button.configure(state="normal")
+                    return
+        except queue.Empty:
+            pass
+
+        # Schedule next check
+        self.after(100, self.process_gui_queue)
+        
     def _on_startup(self):
         if not os.path.exists(CONFIG_FILE):
             reset_config(CONFIG_FILE)

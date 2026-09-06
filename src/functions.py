@@ -1,12 +1,18 @@
 import json
 import os
 import webbrowser
+import sys
 from pathlib import Path
 from threading import Thread
 
 import customtkinter as ctk
 import pynvml
-import whisper
+import whisper  # Retained for helper functions & subtitle writers
+
+sys.path.append(str(Path(__file__).resolve().parent))
+
+from faster_whisper import WhisperModel
+from audio_enhancer import transcribe_with_adaptive_retry
 from PIL import Image
 from pydub import AudioSegment
 from whisper.utils import get_writer
@@ -24,14 +30,6 @@ ICONS = {
 LANGUAGE_VALUES = [
     "Auto",
     "English",
-    "Chinese",
-    "German",
-    "Spanish",
-    "Russian",
-    "Korean",
-    "French",
-    "Japanese",
-    "Portuguese",
     "Turkish",
     "Polish",
     "Catalan",
@@ -164,16 +162,22 @@ def help_page() -> None:
 
 
 def check_gpu() -> dict:
-    pynvml.nvmlInit()
-    device_count = pynvml.nvmlDeviceGetCount()
-    cuda = device_count > 0
+    try:
+        pynvml.nvmlInit()
+        device_count = pynvml.nvmlDeviceGetCount()
+        cuda = device_count > 0
 
-    if cuda:
-        device = pynvml.nvmlDeviceGetHandleByIndex(0)
-        total_mem = pynvml.nvmlDeviceGetMemoryInfo(device).total
-        total_mem_gb = round(total_mem / (1024 ** 3))
-    else:
+        if cuda:
+            device = pynvml.nvmlDeviceGetHandleByIndex(0)
+            total_mem = pynvml.nvmlDeviceGetMemoryInfo(device).total
+            total_mem_gb = round(total_mem / (1024 ** 3))
+        else:
+            total_mem_gb = 0
+
+        pynvml.nvmlShutdown()
+    except Exception:
         total_mem_gb = 0
+        cuda = False
 
     model_req = {
         10: ["large", "large-v1", "large-v2", "large-v3"],
@@ -183,9 +187,6 @@ def check_gpu() -> dict:
     }
 
     models_list = [model for req, models in model_req.items() if total_mem_gb >= req for model in models]
-
-    pynvml.nvmlShutdown()
-
     return {"models": models_list, "cuda": cuda}
 
 
@@ -216,7 +217,8 @@ def load_config(filename: str) -> dict:
             return {}
 
         with open(filename, 'r') as f:
-            return json.load(f)
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
     except Exception as e:
         print(f"Error: {e}")
         return {}
@@ -265,8 +267,7 @@ def subtitles_writer(options: dict = None, callback: any = None) -> None:
 
     if file_extension == ".srt":
         writer = get_writer("srt", dir_name)
-        writer(result, audio_file,
-               default_options)
+        writer(result, audio_file, default_options)
     elif file_extension == ".txt":
         txt_writer = get_writer("txt", dir_name)
         txt_writer(result, audio_file, default_options)
@@ -346,68 +347,44 @@ def start_subtitle(options: dict = None, callback: any = None) -> None:
 
 
 class WhisperTranscriber:
-    def __init__(self, audio_file: str = None, model_size: str = "base", download_root: str = None,
-                 language: str = "auto", task: str = "transcribe",
-                 prompt: dict = None, device: str = None):
-
+    def __init__(self, audio_file, model_size, device, language, task):
         if not audio_file:
             raise ValueError("[!] Audio file not provided!")
-        else:
-            is_valid = self.validate_file(audio_file)
-            if not is_valid:
-                raise ValueError("Error, file is not valid")
-
-        self.available_models = whisper.available_models()
+        if not self.validate_file(audio_file):
+            raise ValueError("Error, file is not valid")
 
         self.audio_file = audio_file
+        self.available_models = ["tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en", "large-v1", "large-v2", "large-v3", "large"]
+        
+        # Clean model size input without appending .en automatically (ensures Turkish support works)
         self.model_size = model_size if model_size in self.available_models else "base"
-        self.download_root = download_root if download_root and os.path.isdir(download_root) else None
-        self.language = self.detect_language() if language == 'auto' else language
-        self.task = "transcribe" if task == 'translate' and self.language in ['en', 'english'] else task
-        self.prompt = self.get_valid_prompts(prompt)
-        self.device = device if device in ["gpu", "cpu"] else None
+        self.device = "cpu"
+        
+        # Format language mapping
+        lang_lower = str(language).lower().strip()
+        if lang_lower in ["auto", "default", "", "none"]:
+            self.language = None
+        elif lang_lower in ["turkish", "tr"]:
+            self.language = "tr"
+        elif lang_lower in ["english", "en"]:
+            self.language = "en"
+        else:
+            self.language = lang_lower
 
-        if self.language in ['en', 'english'] and self.model_size not in ["large", "large-v1", "large-v2", "large-3"]:
-            self.model_size += '.en'
-            print("[!] Using english only model.")
-
-        self.load_model = whisper.load_model(self.model_size, device=self.device, download_root=self.download_root)
-
+        self.task = task if task in ["transcribe", "translate"] else "transcribe"
+        self.prompt = {}
         self.result = None
 
+        # Load optimized INT8 CTranslate2 model for high-speed CPU execution
+        self.load_model = WhisperModel(
+            self.model_size, 
+            device="cpu", 
+            compute_type="int8"
+        )
+
     def transcribe(self) -> dict:
-        result = self.load_model.transcribe(self.audio_file, language=self.language, task=self.task, **self.prompt)
-        self.result = result
-        return result
-
-    def detect_language(self) -> str:
-        model = whisper.load_model("tiny")
-        audio = whisper.load_audio(self.audio_file)
-        audio = whisper.pad_or_trim(audio)
-
-        mel = whisper.log_mel_spectrogram(audio).to(model.device)
-
-        _, probs = model.detect_language(mel)
-        return f"{max(probs, key=probs.get)}"
-
-    def subtitles_writer(self, output_dir: str = None, output_format: str = "txt", options: dict = None) -> None:
-        if not os.path.isdir(output_dir):
-            raise NotADirectoryError(f"({output_dir}) is not a valid directory")
-
-        extensions = ["txt", "srt", "vtt", "tsv", "json"]
-        if output_format not in extensions:
-            raise ValueError(f"[!] ({output_format}) is not a valid output format!")
-
-        default_options = {
-            'max_line_width': None,
-            'max_line_count': None,
-            'highlight_words': False
-        }
-
-        options = options if options else default_options
-
-        writer = get_writer(output_format, output_dir)
-        writer(self.result, self.audio_file, options)
+        # Hand off execution to the standalone audio enhancer module
+        return transcribe_with_adaptive_retry(self, target_score=-0.8, max_retries=2)
 
     @staticmethod
     def get_valid_prompts(prompts) -> dict:
