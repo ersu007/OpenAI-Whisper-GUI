@@ -1,3 +1,4 @@
+# main.py
 import os
 import sys
 import site
@@ -21,7 +22,7 @@ import customtkinter as ctk
 from customtkinter import filedialog as fd
 
 from src.functions import APP_VERSION, ICONS, LANGUAGE_VALUES, FONTS, DROPDOWN, OPTION, BUTTONS, help_page, \
-    reset_config, load_config, save_config, start_transcriber, start_writer, change_theme, start_subtitle
+    reset_config, load_config, save_config, start_writer, change_theme, start_subtitle
 from src.widgets import CTkScrollableDropdownFrame, CTkMessagebox, CTkLoader, SettingsInterface
 
 CURRENT_PATH = os.path.dirname(os.path.realpath(__file__))
@@ -44,39 +45,28 @@ class WhisperGui(ctk.CTk):
     def start_transcription_process(self):
         options = {
             "audio": self.file_path,
-            "model": self.model_option.get(),
+            "model": self.model_option.get().lower(),
             "device": "cuda",
             "compute_type": "float16",
-            "language": self.lang_option.get(),
-            "secondary_language": self.sec_lang_option.get(),
-            "enable_retry": self.retry_switch.get() == 1,
-            "target_score": -1.0,
-            "task": "transcribe"
+            "language": self.language_option.get().lower(),
+            "task": self.task_option.get().lower()
         }
 
-    # Launch background thread using our new pipeline file
+        # Clear text box before starting new transcription
+        self.textbox.delete("0.0", ctk.END)
+
+        # Launch background thread using GPU pipeline file
         threading.Thread(
             target=run_gpu_pipeline, 
             args=(options, self.gui_queue), 
             daemon=True
         ).start()
 
-    # Start queue poller for UI updates
+        # Start queue poller for UI updates
         self.after(100, self.process_gui_queue)
 
-    def _async_transcribe_worker(self, options):
-        """Worker thread executing the transcription task."""
-        try:
-            from src.functions import transcriber_task
-            res = transcriber_task(options=options, gui_queue=self.gui_queue)
-            self.result = res
-        except Exception as e:
-            self.gui_queue.put(("text", f"\n❌ Error during processing: {e}\n"))
-        finally:
-            self.gui_queue.put(("done", None))
-
     def process_gui_queue(self):
-        """Pulls text and progress updates from the background thread into the UI."""
+        """Pulls text, error candidates, and progress updates from the background thread into the UI."""
         try:
             while True:
                 msg_type, data = self.gui_queue.get_nowait()
@@ -91,8 +81,14 @@ class WhisperGui(ctk.CTk):
                     if hasattr(self, "status_label"):
                         self.status_label.configure(text=status_str)
                 elif msg_type == "done":
-                    if hasattr(self, "start_button"):
-                        self.start_button.configure(state="normal")
+                    # Store completed result dict for SRT writing
+                    if data is not None:
+                        self.result = data
+                    
+                    # Re-enable all UI controls when transcription finishes
+                    self.enable_controller()
+                    # if hasattr(self, "loader"):
+                    #    self.loader.stop_loader()
                     return
         except queue.Empty:
             pass
@@ -106,11 +102,18 @@ class WhisperGui(ctk.CTk):
 
         self.config = load_config(CONFIG_FILE)
 
-        self.model = self.config["model"]
+        self.model = self.config.get("model", "large-v3")
         self.language = self.config["language"]
         self.task = self.config["task"]
         self.device = self.config["device"]
-        self.models_value = self.config["models"]
+        
+        # Ensure large and large-v3 are available in choices
+        base_models = self.config.get("models", ["tiny", "base", "small", "medium"])
+        for m in ["large", "large-v3"]:
+            if m not in base_models:
+                base_models.append(m)
+        self.models_value = base_models
+
         device_value = self.config["cuda"]
         self.theme_value = self.config["theme"]
 
@@ -282,7 +285,7 @@ class WhisperGui(ctk.CTk):
 
         if file_path:
             self.disable_controller()
-            self.loader = CTkLoader(self)
+           # self.loader = CTkLoader(self)
             options = {"output_dir": file_path, "result": self.result,
                        "audio_file": self.file_path}
 
@@ -301,19 +304,16 @@ class WhisperGui(ctk.CTk):
         )
         if file_path:
             self.disable_controller()
-            self.loader = CTkLoader(self)
+         #   self.loader = CTkLoader(self)
             start_subtitle({"result": self.result, "audio": self.file_path, "output": file_path, "lang": self.language,
                             "device": self.device}, self.subtitle_notification)
 
     def start_callback(self) -> None:
         self.disable_controller()
-        self.loader = CTkLoader(self)
+# self.loader = CTkLoader(self)  <-- Comment this out
 
-        options = {"audio": self.file_path, "model": self.model_option.get().lower(),
-                   "language": self.language_option.get().lower(), "task": self.task_option.get().lower(),
-                   "device": self.device_option.get().lower()}
-
-        start_transcriber(options, self.show_results)
+        # Trigger GPU pipeline via start_transcription_process
+        self.start_transcription_process()
 
     def _select_file_callback(self) -> None:
         file_path = fd.askopenfilename(
@@ -321,8 +321,8 @@ class WhisperGui(ctk.CTk):
             title="Select Audio/Video File",
             filetypes=(
                 (
-                    ("Video files", "*.mp4 *.avi *.mkv *.mov *.wmv *.webm *.flv"),
                     ("Audiofile", "*.mp3 *.wav *.flac *.aac *.ogg *.wma *.m4a"),
+                    ("Video files", "*.mp4 *.avi *.mkv *.mov *.wmv *.webm *.flv"),
                 )
             ),
         )
@@ -376,16 +376,25 @@ class WhisperGui(ctk.CTk):
         self.geometry(f"{window_width}x{window_height}+{x_coordinate}+{y_coordinate}")
 
     def on_close(self) -> None:
-        options = {
-            "model": self.model_option.get(),
-            "language": self.language_option.get(),
-            "task": self.task_option.get(),
-            "device": self.device_option.get(),
-        }
-        save_config(options, CONFIG_FILE)
+        # Save current UI options to config file
+        try:
+            options = {
+                "model": self.model_option.get(),
+                "language": self.language_option.get(),
+                "task": self.task_option.get(),
+                "device": self.device_option.get(),
+            }
+            save_config(options, CONFIG_FILE)
+        except Exception:
+            pass
 
+        # Stop queue polling loops
+        self.gui_queue.queue.clear()
+        
+        # Destroy GUI safely
+        self.quit()
         self.destroy()
-        sys.exit()
+        sys.exit(0)
 
 
 if __name__ == "__main__":
