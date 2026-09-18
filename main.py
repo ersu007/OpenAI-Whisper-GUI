@@ -248,7 +248,7 @@ class WhisperGui(ctk.CTk):
 
     def subtitle_notification(self, msg: str) -> None:
         self.enable_controller()
-        self.loader.stop_loader()
+        #self.loader.stop_loader()
         CTkMessagebox(self, title="SUCCESS", message=f"Subtitles added to the video: {msg}",
                       corner_radius=8, icon="check")
 
@@ -256,11 +256,11 @@ class WhisperGui(ctk.CTk):
         self.enable_controller()
         self.textbox.insert("0.0", result["text"].strip())
         self.result = result
-        self.loader.stop_loader()
+        #self.loader.stop_loader()
 
     def save_notification(self, msg: str) -> None:
         self.enable_controller()
-        self.loader.stop_loader()
+        #self.loader.stop_loader()
         CTkMessagebox(self, title="SUCCESS", message=msg,
                       corner_radius=8, icon="check")
 
